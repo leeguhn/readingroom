@@ -1,0 +1,11 @@
+{
+  "mode": "keep",
+  "keys": [
+    "conference",
+    "papers",
+    "events",
+    "speakers",
+    "rooms",
+    "tracks"
+  ]
+}

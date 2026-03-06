@@ -41,17 +41,23 @@ REPO_ROOT  = os.path.dirname(SCRIPT_DIR)
 
 THEMES = {}
 
-DEFAULT_RESEARCH = "AI image generation interfaces."
+DEFAULT_RESEARCH = (
+    "Modular, node-based, and iterative interfaces for AI image generation. "
+    "Interested in: semantic image editing, parent-child object relationships, "
+    "sequential composition, prompt refinement, spatial control of AI subjects, "
+    "human-in-the-loop workflows, and novel canvas or node interfaces."
+)
 
 # Per-paper prompt — one paper, one line answer
 FILTER_SYSTEM_PROMPT = (
-    "You screen academic papers. Is this paper related to AI image generation interfaces "
-    "(e.g. text-to-image tools, diffusion model UIs, image synthesis interfaces, "
-    "generative image editing tools)?\n"
-    "Reply with EXACTLY one line: YES, MAYBE, or NO — then a pipe — then a reason in 5-10 words.\n"
-    "Example: YES|Presents a text-to-image generation UI\n"
-    "Example: NO|About robotics, unrelated to image generation\n"
-    "Output ONLY that one line. Nothing else."
+    "You are an expert HCI research scout. Your goal is to identify papers that discuss "
+    "how humans interact with, control, or refine generative AI images.\n"
+    "Include papers about: prompt engineering UIs, iterative refinement, multi-modal control, "
+    "human-in-the-loop workflows, and novel canvas/node interfaces.\n\n"
+    "Even if a paper isn't 'node-based,' if it helps a user improve or edit an AI image, "
+    "mark it as YES or MAYBE.\n"
+    "Reply with EXACTLY one line: [Paper title] |[VERDICT] | [REASON]\n"
+    "Example: ... | YES | Visualizes prompt changes to help users refine outputs"
 )
 
 CHAT_SYSTEM_PROMPT = (
@@ -227,37 +233,34 @@ VERDICT_RE = re.compile(r'(YES|MAYBE|NO)\s*[|:]\s*(.+)', re.IGNORECASE)
 
 def filter_one(paper):
     """Evaluate a single paper. Returns (verdict, reason)."""
-    snippet = paper["abstract"][:400] + ("…" if len(paper["abstract"]) > 400 else "")
-    user_msg = f"Title: {paper['title']}\nAbstract: {snippet}"
+    snippet = paper["abstract"][:500] + ("…" if len(paper["abstract"]) > 500 else "")
+    user_msg = (
+        f"Research interest: {state['research']}\n\n"
+        f"Title: {paper['title']}\n"
+        f"Abstract: {snippet}\n\n"
+        "Would this paper be useful for a Related Work section about "
+        "how humans control or refine AI image generation?"
+    )
     messages = [
         {"role": "system", "content": FILTER_SYSTEM_PROMPT},
         {"role": "user",   "content": user_msg},
     ]
-    _, content = call_llm(messages, max_tokens=60)
+    _, content = call_llm(messages, max_tokens=80)
 
     if state["debug"]:
-        print(f"     RAW: {repr(content[:200])}")
+        print(f"     RAW: {repr(content[:300])}")
 
-    # Search entire response for a YES/MAYBE/NO verdict
+    # Search every line for a YES/MAYBE/NO verdict
     for line in content.splitlines():
+        line = line.strip()
+        if not line:
+            continue
         m = VERDICT_RE.search(line)
         if m:
             verdict = m.group(1).strip().upper()
-            reason  = m.group(2).strip()
+            reason  = m.group(2).strip().strip("|:-").strip()
             return verdict, reason
     return "NO", "Could not parse response."
-
-
-def filter_batch(batch):
-    """Evaluate each paper in the batch one at a time."""
-    results = []
-    for paper in batch:
-        verdict, reason = filter_one(paper)
-        results.append({"paper": paper, "verdict": verdict, "theme": "", "reason": reason})
-        if state["debug"]:
-            icon = "✅" if verdict == "YES" else ("🔶" if verdict == "MAYBE" else "❌")
-            print(f"     {icon} {verdict} | {paper['title'][:50]} | {reason[:50]}")
-    return results
 
 
 def print_result(r, index):

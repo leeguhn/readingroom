@@ -5,6 +5,7 @@ Simple Tkinter GUI to select top-level JSON keys to remove from conference proce
 Usage: run the script, click "Open JSON", check keys you want to remove, set output filename, then click "Save Stripped JSON".
 """
 import json
+import shutil
 import tkinter as tk
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
@@ -101,7 +102,7 @@ class App(tk.Tk):
         self.file_label = ttk.Label(top, text="No files loaded", width=80)
         self.file_label.pack(side="left", padx=8)
 
-        mid = ttk.LabelFrame(self, text="Top-level keys (check to remove)")
+        mid = ttk.LabelFrame(self, text="Top-level keys from reference (check to KEEP)")
         mid.pack(fill="both", expand=True, padx=8, pady=4)
 
         self.scroll = ScrollableFrame(mid)
@@ -112,7 +113,7 @@ class App(tk.Tk):
 
         # Overwrite inputs directly. Optionally create backups before writing.
         self.backup_var = tk.BooleanVar(value=True)
-        backup_cb = ttk.Checkbutton(controls, text="Create .bak.json backup before overwrite", variable=self.backup_var)
+        backup_cb = ttk.Checkbutton(controls, text="Copy original JSON to 'backups' folder before overwrite", variable=self.backup_var)
         backup_cb.grid(row=0, column=1, padx=8, sticky="w")
 
         select_all = ttk.Button(controls, text="Select All", command=self.select_all)
@@ -127,7 +128,7 @@ class App(tk.Tk):
         save_btn = ttk.Button(self, text="Save Stripped JSON", command=self.save)
         save_btn.pack(side="right", padx=8, pady=6)
 
-        note = ttk.Label(self, text="Note: checked keys will be REMOVED from the input file(s). Backups optional.")
+        note = ttk.Label(self, text="Note: the reference JSON is the keep-template. Loaded files are truncated to only the checked categories and subcategories from that reference.")
         note.pack(side="left", padx=8)
 
     def open_file(self):
@@ -206,7 +207,7 @@ class App(tk.Tk):
         for i, p in enumerate(paths):
             depth = len(p) - 1
             label = p[-1]
-            var = tk.BooleanVar(value=False)
+            var = tk.BooleanVar(value=True)
             keystr = "|".join(p)
             cb = ttk.Checkbutton(self.scroll.scrollable_frame, text=label, variable=var, command=lambda ks=keystr: self.on_toggle(ks))
             cb.grid(row=i, column=0, sticky="w", padx=(8 + depth * 16), pady=2)
@@ -274,9 +275,15 @@ class App(tk.Tk):
         if not self.json_data:
             messagebox.showinfo("No file", "No JSON file loaded")
             return
-        to_remove = [k for k, v in self.vars.items() if v.get()]
-        nice = ["/".join(self.path_map[k]) for k in to_remove]
-        messagebox.showinfo("Preview", f"Will remove {len(to_remove)} paths:\n{nice}")
+        to_keep = [k for k, v in self.vars.items() if v.get()]
+        to_remove_explicit = [k for k, v in self.vars.items() if not v.get()]
+        nice_keep = ["/".join(self.path_map[k]) for k in to_keep]
+        nice_remove = ["/".join(self.path_map[k]) for k in to_remove_explicit]
+        msg = f"Will KEEP {len(to_keep)} reference path(s):\n{nice_keep}"
+        if nice_remove:
+            msg += f"\n\nExplicitly EXCLUDED from the reference template:\n{nice_remove}"
+        msg += "\n\nEach loaded JSON will be truncated to only the categories and subcategories present in the resulting reference template."
+        messagebox.showinfo("Preview", msg)
 
     def save(self):
         if not self.json_data:
@@ -287,9 +294,9 @@ class App(tk.Tk):
             messagebox.showerror("Output", "Please set an output filename")
             return
         out = Path(out_path)
-        to_remove = [k for k, v in self.vars.items() if v.get()]
-        if not to_remove:
-            if not messagebox.askyesno("Confirm", "No keys selected for removal. Overwrite files anyway?"):
+        explicitly_unchecked = [k for k, v in self.vars.items() if not v.get()]
+        if not self.path_map:
+            if not messagebox.askyesno("Confirm", "No reference keys found. Overwrite files anyway?"):
                 return
 
         def remove_path(obj: Any, path: Tuple[str, ...]):
@@ -314,6 +321,28 @@ class App(tk.Tk):
                     if isinstance(item, dict):
                         remove_path(item, path)
 
+        def prune_to_reference(data: Any, reference: Any) -> Any:
+            if isinstance(reference, dict):
+                if not isinstance(data, dict):
+                    return data
+                pruned_dict = {}
+                for key, ref_value in reference.items():
+                    if key in data:
+                        pruned_dict[key] = prune_to_reference(data[key], ref_value)
+                return pruned_dict
+
+            if isinstance(reference, list):
+                if not isinstance(data, list):
+                    return data
+                if not reference:
+                    return data
+                template = reference[0]
+                if isinstance(template, (dict, list)):
+                    return [prune_to_reference(item, template) for item in data]
+                return data
+
+            return data
+
         # determine targets
         targets: List[Path] = []
         if hasattr(self, 'file_list') and len(self.file_list) > 0:
@@ -327,6 +356,12 @@ class App(tk.Tk):
         if not messagebox.askyesno("Confirm overwrite", f"This will overwrite {len(targets)} file(s). Continue?"):
             return
 
+        reference_template = json.loads(json.dumps(self.json_data))
+        for keystr in explicitly_unchecked:
+            path = self.path_map.get(keystr)
+            if path:
+                remove_path(reference_template, path)
+
         # apply removals and overwrite each file (with optional backup)
         failed = []
         for infile in targets:
@@ -337,17 +372,17 @@ class App(tk.Tk):
                 failed.append(str(infile))
                 continue
 
-            pruned = json.loads(json.dumps(data))
-            for keystr in to_remove:
-                path = self.path_map.get(keystr)
-                if path:
-                    remove_path(pruned, path)
+            pruned = prune_to_reference(data, reference_template)
 
             if self.backup_var.get():
-                bak = infile.with_name(infile.name + ".bak.json")
+                bak_dir = infile.parent / "backups"
                 try:
-                    with bak.open("w", encoding="utf-8") as bf:
-                        json.dump(data, bf, ensure_ascii=False, indent=2)
+                    bak_dir.mkdir(exist_ok=True)
+                except Exception:
+                    bak_dir = infile.parent  # fallback to same dir if mkdir fails
+                bak = bak_dir / infile.name
+                try:
+                    shutil.copy2(infile, bak)
                 except Exception:
                     # non-fatal, continue
                     pass
